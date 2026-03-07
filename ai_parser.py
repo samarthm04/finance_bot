@@ -6,7 +6,7 @@ from openai import OpenAI
 
 # Perplexity client (OpenAI-compatible)
 client = OpenAI(
-    api_key=os.getenv("api_key"),
+    OPENAI_API_KEY=os.getenv("OPENAI_API_KEY"),
     base_url="https://api.perplexity.ai"
 )
 
