@@ -1,3 +1,5 @@
+import os
+import json
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -6,8 +8,11 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-creds = Credentials.from_service_account_file(
-    "credentials.json",
+# Load credentials from Railway environment variable
+creds_dict = json.loads(os.environ["GOOGLE_CREDENTIALS_JSON"])
+
+creds = Credentials.from_service_account_info(
+    creds_dict,
     scopes=SCOPES
 )
 
@@ -32,5 +37,3 @@ def save_transaction(data, raw_message, sheet_name):
     ]
 
     sheet.append_row(row)
-
-    
