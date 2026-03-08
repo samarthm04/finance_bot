@@ -9,6 +9,73 @@ from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filte
 from ai_parser import extract_transaction
 from sheets_store import save_transaction
 
+# -------- SIMPLE FALLBACK PARSER --------
+def simple_parse(text):
+
+    words = text.lower().split()
+
+    data = {
+        "amount": None,
+        "category": None,
+        "payment_mode": None,
+        "date": None,
+        "type": None
+    }
+
+    # detect transaction type
+    income_words = {"received", "got", "credited", "deposit", "refund", "incoming", "receivedfrom"}
+    expense_words = {"paid", "gave", "sent", "spent", "bought"}
+
+    for w in words:
+        if w in income_words:
+            data["type"] = "income"
+            break
+        if w in expense_words:
+            data["type"] = "expense"
+            break
+
+    # detect amount
+    for w in words:
+        try:
+            value = float(w)
+            data["amount"] = value
+            break
+        except:
+            pass
+
+    # payment mode keywords
+    if "gpay" in words or "upi" in words:
+        data["payment_mode"] = "gpay"
+
+    if "cash" in words:
+        data["payment_mode"] = "cash"
+
+    if "card" in words:
+        data["payment_mode"] = "card"
+
+    # detect date words
+    for w in words:
+        if w in ["today", "yesterday", "tomorrow"]:
+            data["date"] = w
+
+    # guess category (last word that isn't number/payment/date)
+    blacklist = {
+        "gpay", "upi", "cash", "card",
+        "today", "yesterday", "tomorrow",
+        "paid", "gave", "sent", "spent",
+        "received", "got", "credited", "refund"
+    }
+    for w in reversed(words):
+        if w not in blacklist:
+            try:
+                float(w)
+                continue
+            except:
+                data["category"] = w
+                break
+
+    return data
+
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 VALID_SHEETS = ["JCI", "SRPL", "JLM", "MJM", "JJM"]
@@ -24,16 +91,17 @@ def normalize_date(text):
 
     text = text.lower().strip()
 
-    if text == "today":
+    # flexible phrases
+    if "today" in text:
         return now.strftime("%Y-%m-%d")
 
-    if text == "yesterday":
+    if "yesterday" in text:
         return (now - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    if text in ["day before", "day before yesterday"]:
+    if "day before" in text:
         return (now - timedelta(days=2)).strftime("%Y-%m-%d")
 
-    if text == "tomorrow":
+    if "tomorrow" in text:
         return (now + timedelta(days=1)).strftime("%Y-%m-%d")
 
     try:
@@ -79,6 +147,13 @@ async def continue_pipeline(update, user_id):
     if not data.get("date"):
         state["next_field"] = "date"
         await update.message.reply_text("When was the payment made?")
+        return
+
+    # if group already detected, save directly
+    if data.get("group"):
+        save_transaction(data, state["raw"], data["group"])
+        del pending_transactions[user_id]
+        await update.message.reply_text("Transaction saved ✅")
         return
 
     state["next_field"] = "group"
@@ -150,7 +225,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            save_transaction(data, state["raw"], sheet)
+            data["group"] = sheet
+
+            save_transaction(data, state["raw"], data["group"])
 
             del pending_transactions[user_id]
 
@@ -161,12 +238,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # -------- NEW TRANSACTION --------
     try:
 
-        sheet = detect_group(user_text)
-
         data = extract_transaction(user_text)
+
+        # fallback parser if AI misses fields
+        fallback = simple_parse(user_text)
+
+        for k, v in fallback.items():
+            if not data.get(k) and v:
+                data[k] = v
 
         print("AI PARSED DATA:", data)
 
+        # detect group from message
+        sheet = detect_group(user_text)
+        if sheet:
+            data["group"] = sheet
+
+        # normalize parsed date
         if data.get("date"):
             data["date"] = normalize_date(data["date"])
 
@@ -182,10 +270,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             and data.get("amount")
             and data.get("category")
             and data.get("payment_mode")
-            and sheet
+            and data.get("group")
         ):
 
-            save_transaction(data, user_text, sheet)
+            save_transaction(data, user_text, data["group"])
 
             del pending_transactions[user_id]
 
