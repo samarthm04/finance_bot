@@ -13,7 +13,6 @@ from sheets_store import save_transaction
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 VALID_SHEETS = ["JCI", "SRPL", "JLM", "MJM", "JJM"]
 
-# Track ongoing conversations
 pending_transactions = {}
 
 
@@ -23,7 +22,7 @@ def normalize_date(text):
     india = pytz.timezone("Asia/Kolkata")
     now = datetime.now(india)
 
-    text = text.lower()
+    text = text.lower().strip()
 
     if text == "today":
         return now.strftime("%Y-%m-%d")
@@ -49,11 +48,44 @@ def detect_group(text):
 
     text = text.upper()
 
-    for group in VALID_SHEETS:
-        if group in text:
-            return group
+    for g in VALID_SHEETS:
+        if g in text:
+            return g
 
     return None
+
+
+# -------- FIELD CHECK PIPELINE --------
+async def continue_pipeline(update, user_id):
+
+    state = pending_transactions[user_id]
+    data = state["data"]
+
+    if not data.get("amount"):
+        state["next_field"] = "amount"
+        await update.message.reply_text("How much was the payment?")
+        return
+
+    if not data.get("category"):
+        state["next_field"] = "category"
+        await update.message.reply_text("What was this for?")
+        return
+
+    if not data.get("payment_mode"):
+        state["next_field"] = "payment_mode"
+        await update.message.reply_text("How did you pay?")
+        return
+
+    if not data.get("date"):
+        state["next_field"] = "date"
+        await update.message.reply_text("When was the payment made?")
+        return
+
+    state["next_field"] = "group"
+
+    await update.message.reply_text(
+        "Which group?\nJCI / SRPL / JLM / MJM / JJM"
+    )
 
 
 # -------- TELEGRAM HANDLER --------
@@ -64,63 +96,50 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     print("USER MESSAGE:", user_text)
 
-    # If answering follow-up
+    # -------- FOLLOW-UP FLOW --------
     if user_id in pending_transactions:
 
         state = pending_transactions[user_id]
         field = state["next_field"]
+        data = state["data"]
 
-        # DATE FOLLOW-UP
         if field == "date":
 
-            parsed_date = normalize_date(user_text)
+            parsed = normalize_date(user_text)
 
-            if not parsed_date:
+            if not parsed:
                 await update.message.reply_text(
                     "Couldn't understand the date.\nTry: today, yesterday, 14 Jan, Tuesday"
                 )
                 return
 
-            state["data"]["date"] = parsed_date
+            data["date"] = parsed
+            await continue_pipeline(update, user_id)
+            return
 
-            if not state["data"]["amount"]:
-                state["next_field"] = "amount"
-                await update.message.reply_text("How much was the payment?")
-                return
-
-        # AMOUNT FOLLOW-UP
         if field == "amount":
 
             try:
-                state["data"]["amount"] = float(user_text)
+                data["amount"] = float(user_text)
             except:
                 await update.message.reply_text("Please enter a valid number.")
                 return
 
-            state["next_field"] = "category"
-            await update.message.reply_text("What was this for?")
+            await continue_pipeline(update, user_id)
             return
 
-        # CATEGORY FOLLOW-UP
         if field == "category":
 
-            state["data"]["category"] = user_text
-            state["next_field"] = "payment_mode"
-            await update.message.reply_text("How did you pay?")
+            data["category"] = user_text
+            await continue_pipeline(update, user_id)
             return
 
-        # PAYMENT MODE FOLLOW-UP
         if field == "payment_mode":
 
-            state["data"]["payment_mode"] = user_text
-            state["next_field"] = "group"
-
-            await update.message.reply_text(
-                "Which group?\nJCI / SRPL / JLM / MJM / JJM"
-            )
+            data["payment_mode"] = user_text
+            await continue_pipeline(update, user_id)
             return
 
-        # GROUP SELECTION
         if field == "group":
 
             sheet = user_text.upper()
@@ -131,11 +150,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            save_transaction(
-                state["data"],
-                state["raw"],
-                sheet
-            )
+            save_transaction(data, state["raw"], sheet)
 
             del pending_transactions[user_id]
 
@@ -152,46 +167,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         print("AI PARSED DATA:", data)
 
+        if data.get("date"):
+            data["date"] = normalize_date(data["date"])
+
         pending_transactions[user_id] = {
             "data": data,
             "raw": user_text,
             "next_field": None
         }
 
-        # DATE CHECK
-        if not data["date"]:
-            pending_transactions[user_id]["next_field"] = "date"
-            await update.message.reply_text("When was the payment made?")
-            return
-        else:
-            data["date"] = normalize_date(data["date"])
+        # FULL AUTO SAVE
+        if (
+            data.get("date")
+            and data.get("amount")
+            and data.get("category")
+            and data.get("payment_mode")
+            and sheet
+        ):
 
-        # AMOUNT CHECK
-        if not data["amount"]:
-            pending_transactions[user_id]["next_field"] = "amount"
-            await update.message.reply_text("How much was the payment?")
-            return
-
-        # CATEGORY CHECK
-        if not data["category"]:
-            pending_transactions[user_id]["next_field"] = "category"
-            await update.message.reply_text("What was this for?")
-            return
-
-        # PAYMENT MODE CHECK
-        if not data["payment_mode"]:
-            pending_transactions[user_id]["next_field"] = "payment_mode"
-            await update.message.reply_text("How did you pay?")
-            return
-
-        # AUTO GROUP SAVE
-        if sheet:
-
-            save_transaction(
-                data,
-                user_text,
-                sheet
-            )
+            save_transaction(data, user_text, sheet)
 
             del pending_transactions[user_id]
 
@@ -199,12 +193,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             return
 
-        # ASK GROUP
-        pending_transactions[user_id]["next_field"] = "group"
-
-        await update.message.reply_text(
-            "Which group?\nJCI / SRPL / JLM / MJM / JJM"
-        )
+        # CONTINUE ASKING
+        await continue_pipeline(update, user_id)
 
     except Exception as e:
 
@@ -220,7 +210,9 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+    )
 
     print("Bot is running...")
 
