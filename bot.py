@@ -1,4 +1,8 @@
 import os
+from datetime import datetime, timedelta
+from dateutil import parser
+import pytz
+
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
 
@@ -13,6 +17,46 @@ VALID_SHEETS = ["JCI", "SRPL", "JLM", "MJM", "JJM"]
 pending_transactions = {}
 
 
+# -------- DATE NORMALIZER --------
+def normalize_date(text):
+
+    india = pytz.timezone("Asia/Kolkata")
+    now = datetime.now(india)
+
+    text = text.lower()
+
+    if text == "today":
+        return now.strftime("%Y-%m-%d")
+
+    if text == "yesterday":
+        return (now - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    if text in ["day before", "day before yesterday"]:
+        return (now - timedelta(days=2)).strftime("%Y-%m-%d")
+
+    if text == "tomorrow":
+        return (now + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    try:
+        parsed = parser.parse(text, fuzzy=True)
+        return parsed.strftime("%Y-%m-%d")
+    except:
+        return None
+
+
+# -------- GROUP DETECTOR --------
+def detect_group(text):
+
+    text = text.upper()
+
+    for group in VALID_SHEETS:
+        if group in text:
+            return group
+
+    return None
+
+
+# -------- TELEGRAM HANDLER --------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.message.from_user.id
@@ -20,13 +64,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     print("USER MESSAGE:", user_text)
 
-    # If user is answering a follow-up question
+    # If answering follow-up
     if user_id in pending_transactions:
 
         state = pending_transactions[user_id]
         field = state["next_field"]
 
-        # Amount follow-up
+        # DATE FOLLOW-UP
+        if field == "date":
+
+            parsed_date = normalize_date(user_text)
+
+            if not parsed_date:
+                await update.message.reply_text(
+                    "Couldn't understand the date.\nTry: today, yesterday, 14 Jan, Tuesday"
+                )
+                return
+
+            state["data"]["date"] = parsed_date
+
+            if not state["data"]["amount"]:
+                state["next_field"] = "amount"
+                await update.message.reply_text("How much was the payment?")
+                return
+
+        # AMOUNT FOLLOW-UP
         if field == "amount":
 
             try:
@@ -39,7 +101,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("What was this for?")
             return
 
-        # Category follow-up
+        # CATEGORY FOLLOW-UP
         if field == "category":
 
             state["data"]["category"] = user_text
@@ -47,7 +109,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("How did you pay?")
             return
 
-        # Payment mode follow-up
+        # PAYMENT MODE FOLLOW-UP
         if field == "payment_mode":
 
             state["data"]["payment_mode"] = user_text
@@ -58,7 +120,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Group selection
+        # GROUP SELECTION
         if field == "group":
 
             sheet = user_text.upper()
@@ -81,8 +143,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             return
 
-    # Otherwise this is a new transaction
+    # -------- NEW TRANSACTION --------
     try:
+
+        sheet = detect_group(user_text)
 
         data = extract_transaction(user_text)
 
@@ -94,23 +158,48 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "next_field": None
         }
 
-        # Follow-up order
+        # DATE CHECK
+        if not data["date"]:
+            pending_transactions[user_id]["next_field"] = "date"
+            await update.message.reply_text("When was the payment made?")
+            return
+        else:
+            data["date"] = normalize_date(data["date"])
 
+        # AMOUNT CHECK
         if not data["amount"]:
             pending_transactions[user_id]["next_field"] = "amount"
             await update.message.reply_text("How much was the payment?")
             return
 
+        # CATEGORY CHECK
         if not data["category"]:
             pending_transactions[user_id]["next_field"] = "category"
             await update.message.reply_text("What was this for?")
             return
 
+        # PAYMENT MODE CHECK
         if not data["payment_mode"]:
             pending_transactions[user_id]["next_field"] = "payment_mode"
             await update.message.reply_text("How did you pay?")
             return
 
+        # AUTO GROUP SAVE
+        if sheet:
+
+            save_transaction(
+                data,
+                user_text,
+                sheet
+            )
+
+            del pending_transactions[user_id]
+
+            await update.message.reply_text("Transaction saved ✅")
+
+            return
+
+        # ASK GROUP
         pending_transactions[user_id]["next_field"] = "group"
 
         await update.message.reply_text(
@@ -126,6 +215,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+# -------- MAIN --------
 def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
