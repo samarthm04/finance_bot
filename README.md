@@ -220,8 +220,3 @@ This isn’t just a bot — it’s a mini financial assistant system combining:
 * real-world accounting workflows
 
 ⸻
-
-If you want, I can next:
-
-* make this README visually sexy (badges, gifs, UI previews)
-* or turn it into a startup-level product page 😄
